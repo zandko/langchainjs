@@ -113,6 +113,8 @@ export class OpenAIChat
 
   modelName = "gpt-3.5-turbo";
 
+  model = "gpt-3.5-turbo";
+
   prefixMessages?: OpenAIClient.Chat.ChatCompletionMessageParam[];
 
   modelKwargs?: OpenAIChatInput["modelKwargs"];
@@ -155,7 +157,9 @@ export class OpenAIChat
     super(fields ?? {});
 
     this.openAIApiKey =
-      fields?.openAIApiKey ?? getEnvironmentVariable("OPENAI_API_KEY");
+      fields?.apiKey ??
+      fields?.openAIApiKey ??
+      getEnvironmentVariable("OPENAI_API_KEY");
 
     this.azureOpenAIApiKey =
       fields?.azureOpenAIApiKey ??

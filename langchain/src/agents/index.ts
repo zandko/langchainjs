@@ -15,7 +15,6 @@ export {
   type VectorStoreInfo,
   VectorStoreRouterToolkit,
   VectorStoreToolkit,
-  ZapierToolKit,
   createJsonAgent,
   createOpenApiAgent,
   createVectorStoreAgent,
@@ -83,6 +82,10 @@ export {
   type CreateOpenAIToolsAgentParams,
   createOpenAIToolsAgent,
 } from "./openai_tools/index.js";
+export {
+  type CreateToolCallingAgentParams,
+  createToolCallingAgent,
+} from "./tool_calling/index.js";
 export {
   XMLAgent,
   type XMLAgentInput,

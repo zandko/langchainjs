@@ -9,9 +9,10 @@ import type {
   OpenAIToolType,
 } from "./schema.js";
 
-type ThreadMessage = OpenAIClient.Beta.Threads.ThreadMessage;
-type RequiredActionFunctionToolCall =
-  OpenAIClient.Beta.Threads.RequiredActionFunctionToolCall;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ThreadMessage = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type RequiredActionFunctionToolCall = any;
 
 type ExtractRunOutput<AsAgent extends boolean | undefined> =
   AsAgent extends true
@@ -82,7 +83,8 @@ export class OpenAIAssistantRunnable<
       tools: formattedTools,
       model,
       file_ids: fileIds,
-    });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
 
     return new this({
       client: oaiClient,
@@ -96,7 +98,8 @@ export class OpenAIAssistantRunnable<
     input: RunInput,
     _options?: RunnableConfig
   ): Promise<ExtractRunOutput<AsAgent>> {
-    let run: OpenAIClient.Beta.Threads.Run;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let run: any;
     if (this.asAgent && input.steps && input.steps.length > 0) {
       const parsedStepsInput = await this._parseStepsInput(input);
       run = await this.client.beta.threads.runs.submitToolOutputs(
@@ -128,7 +131,8 @@ export class OpenAIAssistantRunnable<
         role: "user",
         file_ids: input.file_ids,
         metadata: input.messagesMetadata,
-      });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
       run = await this._createRun(input);
     } else {
       // Submitting tool outputs to an existing run, outside the AgentExecutor
@@ -187,7 +191,8 @@ export class OpenAIAssistantRunnable<
       instructions,
       model,
       file_ids: fileIds,
-    });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
   }
 
   private async _parseStepsInput(input: RunInput): Promise<RunInput> {
@@ -199,7 +204,8 @@ export class OpenAIAssistantRunnable<
     if (!toolCalls) {
       return input;
     }
-    const toolOutputs = toolCalls.flatMap((toolCall) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const toolOutputs = toolCalls.flatMap((toolCall: any) => {
       const matchedAction = (
         input.steps as {
           action: OpenAIAssistantAction;
@@ -259,7 +265,8 @@ export class OpenAIAssistantRunnable<
 
   private async _waitForRun(runId: string, threadId: string) {
     let inProgress = true;
-    let run = {} as OpenAIClient.Beta.Threads.Run;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let run = {} as any;
     while (inProgress) {
       run = await this.client.beta.threads.runs.retrieve(threadId, runId);
       inProgress = ["in_progress", "queued"].includes(run.status);
@@ -287,7 +294,7 @@ export class OpenAIAssistantRunnable<
     const run = await this._waitForRun(runId, threadId);
     if (run.status === "completed") {
       const messages = await this.client.beta.threads.messages.list(threadId, {
-        order: "asc",
+        order: "desc",
       });
       const newMessages = messages.data.filter((msg) => msg.run_id === runId);
       if (!this.asAgent) {
@@ -314,18 +321,21 @@ export class OpenAIAssistantRunnable<
         return run.required_action?.submit_tool_outputs.tool_calls ?? [];
       }
       const actions: OpenAIAssistantAction[] = [];
-      run.required_action?.submit_tool_outputs.tool_calls.forEach((item) => {
-        const functionCall = item.function;
-        const args = JSON.parse(functionCall.arguments);
-        actions.push({
-          tool: functionCall.name,
-          toolInput: args,
-          toolCallId: item.id,
-          log: "",
-          runId,
-          threadId,
-        });
-      });
+      run.required_action?.submit_tool_outputs.tool_calls.forEach(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (item: any) => {
+          const functionCall = item.function;
+          const args = JSON.parse(functionCall.arguments);
+          actions.push({
+            tool: functionCall.name,
+            toolInput: args,
+            toolCallId: item.id,
+            log: "",
+            runId,
+            threadId,
+          });
+        }
+      );
       return actions;
     }
     const runInfo = JSON.stringify(run, null, 2);

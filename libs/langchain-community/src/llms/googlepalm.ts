@@ -4,15 +4,25 @@ import { type BaseLLMParams, LLM } from "@langchain/core/language_models/llms";
 import { getEnvironmentVariable } from "@langchain/core/utils/env";
 
 /**
+ * @deprecated - Deprecated by Google. Will be removed in 0.3.0
+ *
  * Input for Text generation for Google Palm
  */
 export interface GooglePaLMTextInput extends BaseLLMParams {
   /**
    * Model Name to use
    *
+   * Alias for `model`
+   *
    * Note: The format must follow the pattern - `models/{model}`
    */
   modelName?: string;
+  /**
+   * Model Name to use
+   *
+   * Note: The format must follow the pattern - `models/{model}`
+   */
+  model?: string;
 
   /**
    * Controls the randomness of the output.
@@ -81,6 +91,8 @@ export interface GooglePaLMTextInput extends BaseLLMParams {
 }
 
 /**
+ * @deprecated - Deprecated by Google. Will be removed in 0.3.0
+ *
  * Google Palm 2 Language Model Wrapper to generate texts
  */
 export class GooglePaLM extends LLM implements GooglePaLMTextInput {
@@ -93,6 +105,8 @@ export class GooglePaLM extends LLM implements GooglePaLMTextInput {
   }
 
   modelName = "models/text-bison-001";
+
+  model = "models/text-bison-001";
 
   temperature?: number; // default value chosen based on model
 
@@ -113,7 +127,8 @@ export class GooglePaLM extends LLM implements GooglePaLMTextInput {
   constructor(fields?: GooglePaLMTextInput) {
     super(fields ?? {});
 
-    this.modelName = fields?.modelName ?? this.modelName;
+    this.modelName = fields?.model ?? fields?.modelName ?? this.model;
+    this.model = this.modelName;
 
     this.temperature = fields?.temperature ?? this.temperature;
     if (this.temperature && (this.temperature < 0 || this.temperature > 1)) {
@@ -186,7 +201,7 @@ export class GooglePaLM extends LLM implements GooglePaLMTextInput {
     prompt: string
   ): Promise<string | null | undefined> {
     const res = await this.client.generateText({
-      model: this.modelName,
+      model: this.model,
       temperature: this.temperature,
       candidateCount: 1,
       topK: this.topK,

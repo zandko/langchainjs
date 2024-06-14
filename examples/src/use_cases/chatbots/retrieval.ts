@@ -5,7 +5,7 @@
 import { ChatOpenAI } from "@langchain/openai";
 
 const chat = new ChatOpenAI({
-  modelName: "gpt-3.5-turbo-1106",
+  model: "gpt-3.5-turbo-1106",
   temperature: 0.2,
 });
 
@@ -17,7 +17,7 @@ const loader = new CheerioWebBaseLoader(
 
 const rawDocs = await loader.load();
 
-import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
+import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
 const textSplitter = new RecursiveCharacterTextSplitter({
   chunkSize: 500,

@@ -1,10 +1,12 @@
 /* eslint-disable no-promise-executor-return */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 
 import { Run } from "langsmith";
+import { v4 as uuidv4 } from "uuid";
 import { jest } from "@jest/globals";
 import { createChatMessageChunkEncoderStream } from "../../language_models/chat_models.js";
-import { BaseMessage } from "../../messages/index.js";
+import { BaseMessage, HumanMessage } from "../../messages/index.js";
 import { OutputParserException } from "../../output_parsers/base.js";
 import { StringOutputParser } from "../../output_parsers/string.js";
 import {
@@ -19,6 +21,8 @@ import {
   FakeSplitIntoListParser,
   FakeRunnable,
   FakeListChatModel,
+  SingleRunExtractor,
+  FakeStreamingChatModel,
 } from "../../utils/testing/index.js";
 import { RunnableSequence, RunnableLambda } from "../base.js";
 import { RouterRunnable } from "../router.js";
@@ -191,6 +195,84 @@ test("RunnableLambda that returns a runnable should invoke the runnable", async 
   });
   const result = await runnable.invoke({});
   expect(result).toEqual("testing");
+});
+
+test("RunnableLambda that returns an async iterator should consume it", async () => {
+  const runnable = new RunnableLambda({
+    async *func() {
+      yield "test";
+      yield "ing";
+    },
+  });
+  const result = await runnable.invoke({});
+  expect(result).toEqual("testing");
+  const chunks = [];
+  const stream = await runnable.stream({});
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  expect(chunks).toEqual(["test", "ing"]);
+});
+
+test("RunnableLambda that returns an async iterable should consume it", async () => {
+  const runnable = new RunnableLambda({
+    func() {
+      return new ReadableStream({
+        async start(controller) {
+          controller.enqueue("test");
+          controller.enqueue("ing");
+          controller.close();
+        },
+      });
+    },
+  });
+  const result = await runnable.invoke({});
+  expect(result).toEqual("testing");
+  const chunks = [];
+  const stream = await runnable.stream({});
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  expect(chunks).toEqual(["test", "ing"]);
+});
+
+test("RunnableLambda that returns a promise for async iterable should consume it", async () => {
+  const runnable = new RunnableLambda({
+    async func() {
+      return new ReadableStream({
+        async start(controller) {
+          controller.enqueue("test");
+          controller.enqueue("ing");
+          controller.close();
+        },
+      });
+    },
+  });
+  const result = await runnable.invoke({});
+  expect(result).toEqual("testing");
+  const chunks = [];
+  const stream = await runnable.stream({});
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  expect(chunks).toEqual(["test", "ing"]);
+});
+
+test("RunnableLambda that returns an iterator should consume it", async () => {
+  const runnable = new RunnableLambda({
+    *func() {
+      yield "test";
+      yield "ing";
+    },
+  });
+  const result = await runnable.invoke({});
+  expect(result).toEqual("testing");
+  const chunks = [];
+  const stream = await runnable.stream({});
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  expect(chunks).toEqual(["test", "ing"]);
 });
 
 test("RunnableLambda that returns a streaming runnable should stream output from the inner runnable", async () => {
@@ -410,4 +492,79 @@ test("Should aggregate properly", async () => {
   }
   expect(chunks.length).toEqual(1);
   expect(chunks[0]).toEqual(["France", "Spain", "Japan"]);
+});
+
+describe("runId config", () => {
+  test("invoke", async () => {
+    const tracer = new SingleRunExtractor();
+    const llm = new FakeChatModel({});
+    const testId = uuidv4();
+    await llm.invoke("gg", {
+      callbacks: [tracer],
+      runId: testId,
+    });
+    const run = await tracer.extract();
+    expect(run.id).toBe(testId);
+  });
+
+  test("batch", async () => {
+    jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    const tracer = new SingleRunExtractor();
+    const llm = new FakeChatModel({});
+    const message = new HumanMessage("hello world");
+    const testId = uuidv4();
+    const res = await llm.batch([[message], [message]], {
+      callbacks: [tracer],
+      runId: testId,
+    });
+    const run = await tracer.extract();
+    expect(run.id).toBe(testId);
+    expect(res.length).toBe(2);
+    // .batch will warn if a runId is passed
+    // along with multiple messages
+    expect(console.warn).toBeCalled();
+  });
+
+  test("stream", async () => {
+    const tracer = new SingleRunExtractor();
+    const llm = new FakeStreamingChatModel({});
+    const testId = uuidv4();
+    const stream = await llm.stream("gg", {
+      callbacks: [tracer],
+      runId: testId,
+    });
+    for await (const _ of stream) {
+      // no-op
+    }
+    const run = await tracer.extract();
+    expect(run.id).toBe(testId);
+  });
+
+  test("stream (via llm)", async () => {
+    const tracer = new SingleRunExtractor();
+    const llm = new FakeStreamingLLM({});
+    const testId = uuidv4();
+    const stream = await llm.stream("gg", {
+      callbacks: [tracer],
+      runId: testId,
+    });
+    for await (const _ of stream) {
+      // no-op
+    }
+    const run = await tracer.extract();
+    expect(run.id).toBe(testId);
+  });
+
+  test("invoke (via llm)", async () => {
+    const tracer = new SingleRunExtractor();
+    const llm = new FakeLLM({});
+    const testId = uuidv4();
+    await llm.invoke("gg", {
+      callbacks: [tracer],
+      runId: testId,
+    });
+    const run = await tracer.extract();
+    expect(run.id).toBe(testId);
+  });
 });

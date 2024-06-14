@@ -1,6 +1,11 @@
 import { z } from "zod";
 import pRetry from "p-retry";
+import { v4 as uuidv4 } from "uuid";
 
+import {
+  type TraceableFunction,
+  isTraceableFunction,
+} from "langsmith/singletons/traceable";
 import type { RunnableInterface, RunnableBatchOptions } from "./types.js";
 import {
   CallbackManager,
@@ -11,9 +16,15 @@ import {
   LogStreamCallbackHandlerInput,
   RunLog,
   RunLogPatch,
+  isLogStreamHandler,
+} from "../tracers/log_stream.js";
+import {
+  EventStreamCallbackHandler,
+  EventStreamCallbackHandlerInput,
   StreamEvent,
   StreamEventData,
-} from "../tracers/log_stream.js";
+  isStreamEventsHandler,
+} from "../tracers/event_stream.js";
 import { Serializable } from "../load/serializable.js";
 import {
   IterableReadableStream,
@@ -33,10 +44,17 @@ import {
 import { AsyncCaller } from "../utils/async_caller.js";
 import { Run } from "../tracers/base.js";
 import { RootListenersTracer } from "../tracers/root_listener.js";
-import { BaseCallbackHandler } from "../callbacks/base.js";
 import { _RootEventFilter, isRunnableInterface } from "./utils.js";
 import { AsyncLocalStorageProviderSingleton } from "../singletons/index.js";
 import { Graph } from "./graph.js";
+import { convertToHttpEventStream } from "./wrappers.js";
+import {
+  consumeAsyncIterableInContext,
+  consumeIteratorInContext,
+  isAsyncIterable,
+  isIterableIterator,
+  isIterator,
+} from "./iter.js";
 
 export { type RunnableInterface, RunnableBatchOptions };
 
@@ -61,8 +79,13 @@ export type RunnableLike<RunInput = any, RunOutput = any> =
   | RunnableFunc<RunInput, RunOutput>
   | RunnableMapLike<RunInput, RunOutput>;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type RunnableRetryFailedAttemptHandler = (error: any) => any;
+export type RunnableRetryFailedAttemptHandler = (
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  error: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  input: any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+) => any;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function _coerceToDict(value: any, defaultKey: string) {
@@ -181,13 +204,26 @@ export abstract class Runnable<
     options: Partial<O> | Partial<O>[],
     length = 0
   ): Partial<O>[] {
+    if (Array.isArray(options) && options.length !== length) {
+      throw new Error(
+        `Passed "options" must be an array with the same length as the inputs, but got ${options.length} options for ${length} inputs`
+      );
+    }
+
     if (Array.isArray(options)) {
-      if (options.length !== length) {
-        throw new Error(
-          `Passed "options" must be an array with the same length as the inputs, but got ${options.length} options for ${length} inputs`
-        );
-      }
       return options.map(ensureConfig);
+    }
+    if (length > 1 && !Array.isArray(options) && options.runId) {
+      console.warn(
+        "Provided runId will be used only for the first element of the batch."
+      );
+      const subsequent = Object.fromEntries(
+        Object.entries(options).filter(([key]) => key !== "runId")
+      );
+
+      return Array.from({ length }, (_, i) =>
+        ensureConfig(i === 0 ? options : subsequent)
+      ) as Partial<O>[];
     }
     return Array.from({ length }, () => ensureConfig(options));
   }
@@ -273,9 +309,11 @@ export abstract class Runnable<
   ): Promise<IterableReadableStream<RunOutput>> {
     // Buffer the first streamed chunk to allow for initial errors
     // to surface immediately.
-    const wrappedGenerator = new AsyncGeneratorWithSetup(
-      this._streamIterator(input, ensureConfig(options))
-    );
+    const config = ensureConfig(options);
+    const wrappedGenerator = new AsyncGeneratorWithSetup({
+      generator: this._streamIterator(input, config),
+      config,
+    });
     await wrappedGenerator.setup;
     return IterableReadableStream.fromAsyncGenerator(wrappedGenerator);
   }
@@ -295,6 +333,7 @@ export abstract class Runnable<
         configurable: options.configurable,
         recursionLimit: options.recursionLimit,
         maxConcurrency: options.maxConcurrency,
+        runId: options.runId,
       });
     }
     const callOptions = { ...(options as Partial<CallOptions>) };
@@ -305,6 +344,7 @@ export abstract class Runnable<
     delete callOptions.configurable;
     delete callOptions.recursionLimit;
     delete callOptions.maxConcurrency;
+    delete callOptions.runId;
     return [runnableConfig, callOptions];
   }
 
@@ -324,12 +364,13 @@ export abstract class Runnable<
     const runManager = await callbackManager_?.handleChainStart(
       this.toJSON(),
       _coerceToDict(input, "input"),
-      undefined,
+      config.runId,
       config?.runType,
       undefined,
       undefined,
       config?.runName ?? this.getName()
     );
+    delete config.runId;
     let output;
     try {
       output = await func.call(this, input, config, runManager);
@@ -368,17 +409,19 @@ export abstract class Runnable<
       optionsList.map(getCallbackManagerForConfig)
     );
     const runManagers = await Promise.all(
-      callbackManagers.map((callbackManager, i) =>
-        callbackManager?.handleChainStart(
+      callbackManagers.map(async (callbackManager, i) => {
+        const handleStartRes = await callbackManager?.handleChainStart(
           this.toJSON(),
           _coerceToDict(inputs[i], "input"),
-          undefined,
+          optionsList[i].runId,
           optionsList[i].runType,
           undefined,
           undefined,
           optionsList[i].runName ?? this.getName()
-        )
-      )
+        );
+        delete optionsList[i].runId;
+        return handleStartRes;
+      })
     );
     let outputs: (RunOutput | Error)[];
     try {
@@ -455,27 +498,36 @@ export abstract class Runnable<
           callbackManager_?.handleChainStart(
             this.toJSON(),
             { input: "" },
+            config.runId,
+            config.runType,
             undefined,
-            config?.runType,
             undefined,
-            undefined,
-            config?.runName ?? this.getName()
+            config.runName ?? this.getName()
           ),
         config
       );
+      delete config.runId;
       runManager = pipe.setup;
-      const isLogStreamHandler = (
-        handler: BaseCallbackHandler
-      ): handler is LogStreamCallbackHandler =>
-        handler.name === "log_stream_tracer";
-      const streamLogHandler = runManager?.handlers.find(isLogStreamHandler);
+
+      const streamEventsHandler = runManager?.handlers.find(
+        isStreamEventsHandler
+      );
       let iterator = pipe.output;
-      if (streamLogHandler !== undefined && runManager !== undefined) {
-        iterator = await streamLogHandler.tapOutputIterable(
+      if (streamEventsHandler !== undefined && runManager !== undefined) {
+        iterator = streamEventsHandler.tapOutputIterable(
           runManager.runId,
-          pipe.output
+          iterator
         );
       }
+
+      const streamLogHandler = runManager?.handlers.find(isLogStreamHandler);
+      if (streamLogHandler !== undefined && runManager !== undefined) {
+        iterator = streamLogHandler.tapOutputIterable(
+          runManager.runId,
+          iterator
+        );
+      }
+
       for await (const chunk of iterator) {
         yield chunk;
         if (finalOutputSupported) {
@@ -688,33 +740,159 @@ export abstract class Runnable<
    * chains. Metadata fields have been omitted from the table for brevity.
    * Chain definitions have been included after the table.
    *
-   * | event                | name             | chunk                              | input                                         | output                                          |
-   * |----------------------|------------------|------------------------------------|-----------------------------------------------|-------------------------------------------------|
-   * | on_llm_start         | [model name]     |                                    | {'input': 'hello'}                            |                                                 |
-   * | on_llm_stream        | [model name]     | 'Hello' OR AIMessageChunk("hello") |                                               |                                                 |
-   * | on_llm_end           | [model name]     |                                    | 'Hello human!'                                |
-   * | on_chain_start       | format_docs      |                                    |                                               |                                                 |
-   * | on_chain_stream      | format_docs      | "hello world!, goodbye world!"     |                                               |                                                 |
-   * | on_chain_end         | format_docs      |                                    | [Document(...)]                               | "hello world!, goodbye world!"                  |
-   * | on_tool_start        | some_tool        |                                    | {"x": 1, "y": "2"}                            |                                                 |
-   * | on_tool_stream       | some_tool        |   {"x": 1, "y": "2"}               |                                               |                                                 |
-   * | on_tool_end          | some_tool        |                                    |                                               | {"x": 1, "y": "2"}                              |
-   * | on_retriever_start   | [retriever name] |                                    | {"query": "hello"}                            |                                                 |
-   * | on_retriever_chunk   | [retriever name] |  {documents: [...]}                |                                               |                                                 |
-   * | on_retriever_end     | [retriever name] |                                    | {"query": "hello"}                            | {documents: [...]}                              |
-   * | on_prompt_start      | [template_name]  |                                    | {"question": "hello"}                         |                                                 |
-   * | on_prompt_end        | [template_name]  |                                    | {"question": "hello"}                         | ChatPromptValue(messages: [SystemMessage, ...]) |
+   * **ATTENTION** This reference table is for the V2 version of the schema.
+   *
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | event                | name             | chunk                           | input                                         | output                                          |
+   * +======================+==================+=================================+===============================================+=================================================+
+   * | on_chat_model_start  | [model name]     |                                 | {"messages": [[SystemMessage, HumanMessage]]} |                                                 |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_chat_model_stream | [model name]     | AIMessageChunk(content="hello") |                                               |                                                 |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_chat_model_end    | [model name]     |                                 | {"messages": [[SystemMessage, HumanMessage]]} | AIMessageChunk(content="hello world")           |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_llm_start         | [model name]     |                                 | {'input': 'hello'}                            |                                                 |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_llm_stream        | [model name]     | 'Hello'                         |                                               |                                                 |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_llm_end           | [model name]     |                                 | 'Hello human!'                                |                                                 |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_chain_start       | format_docs      |                                 |                                               |                                                 |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_chain_stream      | format_docs      | "hello world!, goodbye world!"  |                                               |                                                 |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_chain_end         | format_docs      |                                 | [Document(...)]                               | "hello world!, goodbye world!"                  |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_tool_start        | some_tool        |                                 | {"x": 1, "y": "2"}                            |                                                 |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_tool_end          | some_tool        |                                 |                                               | {"x": 1, "y": "2"}                              |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_retriever_start   | [retriever name] |                                 | {"query": "hello"}                            |                                                 |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_retriever_end     | [retriever name] |                                 | {"query": "hello"}                            | [Document(...), ..]                             |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_prompt_start      | [template_name]  |                                 | {"question": "hello"}                         |                                                 |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
+   * | on_prompt_end        | [template_name]  |                                 | {"question": "hello"}                         | ChatPromptValue(messages: [SystemMessage, ...]) |
+   * +----------------------+------------------+---------------------------------+-----------------------------------------------+-------------------------------------------------+
    */
-  async *streamEvents(
+  streamEvents(
     input: RunInput,
-    options: Partial<CallOptions> & { version: "v1" },
-    streamOptions?: Omit<LogStreamCallbackHandlerInput, "autoClose">
-  ): AsyncGenerator<StreamEvent> {
-    if (options.version !== "v1") {
+    options: Partial<CallOptions> & { version: "v1" | "v2" },
+    streamOptions?: Omit<EventStreamCallbackHandlerInput, "autoClose">
+  ): IterableReadableStream<StreamEvent>;
+
+  streamEvents(
+    input: RunInput,
+    options: Partial<CallOptions> & {
+      version: "v1" | "v2";
+      encoding: "text/event-stream";
+    },
+    streamOptions?: Omit<EventStreamCallbackHandlerInput, "autoClose">
+  ): IterableReadableStream<Uint8Array>;
+
+  streamEvents(
+    input: RunInput,
+    options: Partial<CallOptions> & {
+      version: "v1" | "v2";
+      encoding?: "text/event-stream" | undefined;
+    },
+    streamOptions?: Omit<EventStreamCallbackHandlerInput, "autoClose">
+  ): IterableReadableStream<StreamEvent | Uint8Array> {
+    let stream;
+    if (options.version === "v1") {
+      stream = this._streamEventsV1(input, options, streamOptions);
+    } else if (options.version === "v2") {
+      stream = this._streamEventsV2(input, options, streamOptions);
+    } else {
       throw new Error(
-        `Only version "v1" of the events schema is currently supported.`
+        `Only versions "v1" and "v2" of the schema are currently supported.`
       );
     }
+    if (options.encoding === "text/event-stream") {
+      return convertToHttpEventStream(stream);
+    } else {
+      return IterableReadableStream.fromAsyncGenerator(stream);
+    }
+  }
+
+  private async *_streamEventsV2(
+    input: RunInput,
+    options: Partial<CallOptions> & { version: "v1" | "v2" },
+    streamOptions?: Omit<EventStreamCallbackHandlerInput, "autoClose">
+  ): AsyncGenerator<StreamEvent> {
+    const eventStreamer = new EventStreamCallbackHandler({
+      ...streamOptions,
+      autoClose: false,
+    });
+    const config = ensureConfig(options);
+    const runId = config.runId ?? uuidv4();
+    config.runId = runId;
+    const callbacks = config.callbacks;
+    if (callbacks === undefined) {
+      config.callbacks = [eventStreamer];
+    } else if (Array.isArray(callbacks)) {
+      config.callbacks = callbacks.concat(eventStreamer);
+    } else {
+      const copiedCallbacks = callbacks.copy();
+      copiedCallbacks.inheritableHandlers.push(eventStreamer);
+      // eslint-disable-next-line no-param-reassign
+      config.callbacks = copiedCallbacks;
+    }
+    // Call the runnable in streaming mode,
+    // add each chunk to the output stream
+    const outerThis = this;
+    async function consumeRunnableStream() {
+      try {
+        const runnableStream = await outerThis.stream(input, config);
+        const tappedStream = eventStreamer.tapOutputIterable(
+          runId,
+          runnableStream
+        );
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        for await (const _ of tappedStream) {
+          // Just iterate so that the callback handler picks up events
+        }
+      } finally {
+        await eventStreamer.finish();
+      }
+    }
+    const runnableStreamConsumePromise = consumeRunnableStream();
+    let firstEventSent = false;
+    let firstEventRunId;
+    try {
+      for await (const event of eventStreamer) {
+        // This is a work-around an issue where the inputs into the
+        // chain are not available until the entire input is consumed.
+        // As a temporary solution, we'll modify the input to be the input
+        // that was passed into the chain.
+        if (!firstEventSent) {
+          event.data.input = input;
+          firstEventSent = true;
+          firstEventRunId = event.run_id;
+          yield event;
+          continue;
+        }
+        if (event.run_id === firstEventRunId && event.event.endsWith("_end")) {
+          // If it's the end event corresponding to the root runnable
+          // we dont include the input in the event since it's guaranteed
+          // to be included in the first event.
+          if (event.data?.input) {
+            delete event.data.input;
+          }
+        }
+        yield event;
+      }
+    } finally {
+      await runnableStreamConsumePromise;
+    }
+  }
+
+  private async *_streamEventsV1(
+    input: RunInput,
+    options: Partial<CallOptions> & { version: "v1" | "v2" },
+    streamOptions?: Omit<LogStreamCallbackHandlerInput, "autoClose">
+  ): AsyncGenerator<StreamEvent> {
     let runLog;
     let hasEncounteredStartEvent = false;
     const config = ensureConfig(options);
@@ -1072,19 +1250,45 @@ export class RunnableBinding<
     );
   }
 
-  async *streamEvents(
+  streamEvents(
     input: RunInput,
-    options: Partial<CallOptions> & { version: "v1" },
+    options: Partial<CallOptions> & { version: "v1" | "v2" },
     streamOptions?: Omit<LogStreamCallbackHandlerInput, "autoClose">
-  ): AsyncGenerator<StreamEvent> {
-    yield* this.bound.streamEvents(
-      input,
-      {
-        ...(await this._mergeConfig(ensureConfig(options), this.kwargs)),
-        version: options.version,
-      },
-      streamOptions
-    );
+  ): IterableReadableStream<StreamEvent>;
+
+  streamEvents(
+    input: RunInput,
+    options: Partial<CallOptions> & {
+      version: "v1" | "v2";
+      encoding: "text/event-stream";
+    },
+    streamOptions?: Omit<LogStreamCallbackHandlerInput, "autoClose">
+  ): IterableReadableStream<Uint8Array>;
+
+  streamEvents(
+    input: RunInput,
+    options: Partial<CallOptions> & {
+      version: "v1" | "v2";
+      encoding?: "text/event-stream" | undefined;
+    },
+    streamOptions?: Omit<LogStreamCallbackHandlerInput, "autoClose">
+  ): IterableReadableStream<StreamEvent | Uint8Array> {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const outerThis = this;
+    const generator = async function* () {
+      yield* outerThis.bound.streamEvents(
+        input,
+        {
+          ...(await outerThis._mergeConfig(
+            ensureConfig(options),
+            outerThis.kwargs
+          )),
+          version: options.version,
+        },
+        streamOptions
+      );
+    };
+    return IterableReadableStream.fromAsyncGenerator(generator());
   }
 
   static isRunnableBinding(
@@ -1249,7 +1453,7 @@ export class RunnableRetry<
   protected maxAttemptNumber = 3;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  onFailedAttempt?: RunnableRetryFailedAttemptHandler = () => {};
+  onFailedAttempt: RunnableRetryFailedAttemptHandler = () => {};
 
   constructor(
     fields: RunnableBindingArgs<RunInput, RunOutput, CallOptions> & {
@@ -1284,7 +1488,8 @@ export class RunnableRetry<
           this._patchConfigForRetry(attemptNumber, config, runManager)
         ),
       {
-        onFailedAttempt: this.onFailedAttempt,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        onFailedAttempt: (error: any) => this.onFailedAttempt(error, input),
         retries: Math.max(this.maxAttemptNumber - 1, 0),
         randomize: true,
       }
@@ -1343,6 +1548,8 @@ export class RunnableRetry<
             if (result instanceof Error) {
               if (firstException === undefined) {
                 firstException = result;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (firstException as any).input = remainingInputs[i];
               }
             }
             resultsMap[resultMapIndex.toString()] = result;
@@ -1353,7 +1560,9 @@ export class RunnableRetry<
           return results;
         },
         {
-          onFailedAttempt: this.onFailedAttempt,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          onFailedAttempt: (error: any) =>
+            this.onFailedAttempt(error, error.input),
           retries: Math.max(this.maxAttemptNumber - 1, 0),
           randomize: true,
         }
@@ -1458,12 +1667,13 @@ export class RunnableSequence<
     const runManager = await callbackManager_?.handleChainStart(
       this.toJSON(),
       _coerceToDict(input, "input"),
-      undefined,
+      config.runId,
       undefined,
       undefined,
       undefined,
       config?.runName
     );
+    delete config.runId;
     let nextStepInput = input;
     let finalOutput: RunOutput;
     try {
@@ -1520,17 +1730,19 @@ export class RunnableSequence<
       configList.map(getCallbackManagerForConfig)
     );
     const runManagers = await Promise.all(
-      callbackManagers.map((callbackManager, i) =>
-        callbackManager?.handleChainStart(
+      callbackManagers.map(async (callbackManager, i) => {
+        const handleStartRes = await callbackManager?.handleChainStart(
           this.toJSON(),
           _coerceToDict(inputs[i], "input"),
-          undefined,
+          configList[i].runId,
           undefined,
           undefined,
           undefined,
           configList[i].runName
-        )
-      )
+        );
+        delete configList[i].runId;
+        return handleStartRes;
+      })
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let nextStepInputs: any = inputs;
@@ -1565,14 +1777,15 @@ export class RunnableSequence<
     options?: RunnableConfig
   ): AsyncGenerator<RunOutput> {
     const callbackManager_ = await getCallbackManagerForConfig(options);
+    const { runId, ...otherOptions } = options ?? {};
     const runManager = await callbackManager_?.handleChainStart(
       this.toJSON(),
       _coerceToDict(input, "input"),
+      runId,
       undefined,
       undefined,
       undefined,
-      undefined,
-      options?.runName
+      otherOptions?.runName
     );
     const steps = [this.first, ...this.middle, this.last];
     let concatSupported = true;
@@ -1583,7 +1796,7 @@ export class RunnableSequence<
     try {
       let finalGenerator = steps[0].transform(
         inputGenerator(),
-        patchConfig(options, {
+        patchConfig(otherOptions, {
           callbacks: runManager?.getChild(`seq:step:1`),
         })
       );
@@ -1591,7 +1804,7 @@ export class RunnableSequence<
         const step = steps[i];
         finalGenerator = await step.transform(
           finalGenerator,
-          patchConfig(options, {
+          patchConfig(otherOptions, {
             callbacks: runManager?.getChild(`seq:step:${i + 1}`),
           })
         );
@@ -1765,12 +1978,13 @@ export class RunnableMap<
       {
         input,
       },
-      undefined,
+      config.runId,
       undefined,
       undefined,
       undefined,
       config?.runName
     );
+    delete config.runId;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const output: Record<string, any> = {};
     try {
@@ -1847,11 +2061,98 @@ export class RunnableMap<
     async function* generator() {
       yield input;
     }
-    const wrappedGenerator = new AsyncGeneratorWithSetup(
-      this.transform(generator(), options)
-    );
+    const config = ensureConfig(options);
+    const wrappedGenerator = new AsyncGeneratorWithSetup({
+      generator: this.transform(generator(), config),
+      config,
+    });
     await wrappedGenerator.setup;
     return IterableReadableStream.fromAsyncGenerator(wrappedGenerator);
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyTraceableFunction = TraceableFunction<(...any: any[]) => any>;
+
+/**
+ * A runnable that wraps a traced LangSmith function.
+ */
+export class RunnableTraceable<RunInput, RunOutput> extends Runnable<
+  RunInput,
+  RunOutput
+> {
+  lc_serializable = false;
+
+  lc_namespace = ["langchain_core", "runnables"];
+
+  protected func: AnyTraceableFunction;
+
+  constructor(fields: { func: AnyTraceableFunction }) {
+    super(fields);
+
+    if (!isTraceableFunction(fields.func)) {
+      throw new Error(
+        "RunnableTraceable requires a function that is wrapped in traceable higher-order function"
+      );
+    }
+
+    this.func = fields.func;
+  }
+
+  async invoke(input: RunInput, options?: Partial<RunnableConfig>) {
+    const [config] = this._getOptionsList(options ?? {}, 1);
+    const callbacks = await getCallbackManagerForConfig(config);
+
+    return (await this.func(
+      patchConfig(config, { callbacks }),
+      input
+    )) as RunOutput;
+  }
+
+  async *_streamIterator(
+    input: RunInput,
+    options?: Partial<RunnableConfig>
+  ): AsyncGenerator<RunOutput> {
+    const result = await this.invoke(input, options);
+
+    if (isAsyncIterable(result)) {
+      for await (const item of result) {
+        yield item as RunOutput;
+      }
+      return;
+    }
+
+    if (isIterator(result)) {
+      while (true) {
+        const state: IteratorResult<unknown> = result.next();
+        if (state.done) break;
+        yield state.value as RunOutput;
+      }
+      return;
+    }
+
+    yield result;
+  }
+
+  static from(func: AnyTraceableFunction) {
+    return new RunnableTraceable({ func });
+  }
+}
+
+function assertNonTraceableFunction<RunInput, RunOutput>(
+  func:
+    | RunnableFunc<RunInput, RunOutput | Runnable<RunInput, RunOutput>>
+    | TraceableFunction<
+        RunnableFunc<RunInput, RunOutput | Runnable<RunInput, RunOutput>>
+      >
+): asserts func is RunnableFunc<
+  RunInput,
+  RunOutput | Runnable<RunInput, RunOutput>
+> {
+  if (isTraceableFunction(func)) {
+    throw new Error(
+      "RunnableLambda requires a function that is not wrapped in traceable higher-order function. This shouldn't happen."
+    );
   }
 }
 
@@ -1874,14 +2175,42 @@ export class RunnableLambda<RunInput, RunOutput> extends Runnable<
   >;
 
   constructor(fields: {
-    func: RunnableFunc<RunInput, RunOutput | Runnable<RunInput, RunOutput>>;
+    func:
+      | RunnableFunc<RunInput, RunOutput | Runnable<RunInput, RunOutput>>
+      | TraceableFunction<
+          RunnableFunc<RunInput, RunOutput | Runnable<RunInput, RunOutput>>
+        >;
   }) {
+    if (isTraceableFunction(fields.func)) {
+      // eslint-disable-next-line no-constructor-return
+      return RunnableTraceable.from(fields.func) as unknown as RunnableLambda<
+        RunInput,
+        RunOutput
+      >;
+    }
+
     super(fields);
+
+    assertNonTraceableFunction(fields.func);
     this.func = fields.func;
   }
 
   static from<RunInput, RunOutput>(
     func: RunnableFunc<RunInput, RunOutput | Runnable<RunInput, RunOutput>>
+  ): RunnableLambda<RunInput, RunOutput>;
+
+  static from<RunInput, RunOutput>(
+    func: TraceableFunction<
+      RunnableFunc<RunInput, RunOutput | Runnable<RunInput, RunOutput>>
+    >
+  ): RunnableLambda<RunInput, RunOutput>;
+
+  static from<RunInput, RunOutput>(
+    func:
+      | RunnableFunc<RunInput, RunOutput | Runnable<RunInput, RunOutput>>
+      | TraceableFunction<
+          RunnableFunc<RunInput, RunOutput | Runnable<RunInput, RunOutput>>
+        >
   ): RunnableLambda<RunInput, RunOutput> {
     return new RunnableLambda({
       func,
@@ -1915,6 +2244,44 @@ export class RunnableLambda<RunInput, RunOutput> extends Runnable<
                 recursionLimit:
                   (childConfig.recursionLimit ?? DEFAULT_RECURSION_LIMIT) - 1,
               });
+            } else if (isAsyncIterable(output)) {
+              let finalOutput: RunOutput | undefined;
+              for await (const chunk of consumeAsyncIterableInContext(
+                childConfig,
+                output
+              )) {
+                if (finalOutput === undefined) {
+                  finalOutput = chunk as RunOutput;
+                } else {
+                  // Make a best effort to gather, for any type that supports concat.
+                  try {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    finalOutput = concat(finalOutput, chunk as any);
+                  } catch (e) {
+                    finalOutput = chunk as RunOutput;
+                  }
+                }
+              }
+              output = finalOutput as typeof output;
+            } else if (isIterableIterator(output)) {
+              let finalOutput: RunOutput | undefined;
+              for (const chunk of consumeIteratorInContext(
+                childConfig,
+                output
+              )) {
+                if (finalOutput === undefined) {
+                  finalOutput = chunk as RunOutput;
+                } else {
+                  // Make a best effort to gather, for any type that supports concat.
+                  try {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    finalOutput = concat(finalOutput, chunk as any);
+                  } catch (e) {
+                    finalOutput = chunk as RunOutput;
+                  }
+                }
+              }
+              output = finalOutput as typeof output;
             }
             resolve(output);
           } catch (e) {
@@ -1984,6 +2351,14 @@ export class RunnableLambda<RunInput, RunOutput> extends Runnable<
       for await (const chunk of stream) {
         yield chunk;
       }
+    } else if (isAsyncIterable(output)) {
+      for await (const chunk of consumeAsyncIterableInContext(config, output)) {
+        yield chunk as RunOutput;
+      }
+    } else if (isIterableIterator(output)) {
+      for (const chunk of consumeIteratorInContext(config, output)) {
+        yield chunk as RunOutput;
+      }
     } else {
       yield output;
     }
@@ -2007,9 +2382,11 @@ export class RunnableLambda<RunInput, RunOutput> extends Runnable<
     async function* generator() {
       yield input;
     }
-    const wrappedGenerator = new AsyncGeneratorWithSetup(
-      this.transform(generator(), options)
-    );
+    const config = ensureConfig(options);
+    const wrappedGenerator = new AsyncGeneratorWithSetup({
+      generator: this.transform(generator(), config),
+      config,
+    });
     await wrappedGenerator.setup;
     return IterableReadableStream.fromAsyncGenerator(wrappedGenerator);
   }
@@ -2063,21 +2440,22 @@ export class RunnableWithFallbacks<RunInput, RunOutput> extends Runnable<
       undefined,
       options?.metadata
     );
+    const { runId, ...otherOptions } = options ?? {};
     const runManager = await callbackManager_?.handleChainStart(
       this.toJSON(),
       _coerceToDict(input, "input"),
+      runId,
       undefined,
       undefined,
       undefined,
-      undefined,
-      options?.runName
+      otherOptions?.runName
     );
     let firstError;
     for (const runnable of this.runnables()) {
       try {
         const output = await runnable.invoke(
           input,
-          patchConfig(options, { callbacks: runManager?.getChild() })
+          patchConfig(otherOptions, { callbacks: runManager?.getChild() })
         );
         await runManager?.handleChainEnd(_coerceToDict(output, "output"));
         return output;
@@ -2133,17 +2511,19 @@ export class RunnableWithFallbacks<RunInput, RunOutput> extends Runnable<
       )
     );
     const runManagers = await Promise.all(
-      callbackManagers.map((callbackManager, i) =>
-        callbackManager?.handleChainStart(
+      callbackManagers.map(async (callbackManager, i) => {
+        const handleStartRes = await callbackManager?.handleChainStart(
           this.toJSON(),
           _coerceToDict(inputs[i], "input"),
-          undefined,
+          configList[i].runId,
           undefined,
           undefined,
           undefined,
           configList[i].runName
-        )
-      )
+        );
+        delete configList[i].runId;
+        return handleStartRes;
+      })
     );
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2311,9 +2691,11 @@ export class RunnableAssign<
     async function* generator() {
       yield input;
     }
-    const wrappedGenerator = new AsyncGeneratorWithSetup(
-      this.transform(generator(), options)
-    );
+    const config = ensureConfig(options);
+    const wrappedGenerator = new AsyncGeneratorWithSetup({
+      generator: this.transform(generator(), config),
+      config,
+    });
     await wrappedGenerator.setup;
     return IterableReadableStream.fromAsyncGenerator(wrappedGenerator);
   }
@@ -2402,9 +2784,11 @@ export class RunnablePick<
     async function* generator() {
       yield input;
     }
-    const wrappedGenerator = new AsyncGeneratorWithSetup(
-      this.transform(generator(), options)
-    );
+    const config = ensureConfig(options);
+    const wrappedGenerator = new AsyncGeneratorWithSetup({
+      generator: this.transform(generator(), config),
+      config,
+    });
     await wrappedGenerator.setup;
     return IterableReadableStream.fromAsyncGenerator(wrappedGenerator);
   }

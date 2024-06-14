@@ -21,6 +21,8 @@ export type BaseMessageExamplePair = {
 };
 
 /**
+ * @deprecated - Deprecated by Google. Will be removed in 0.3.0
+ *
  * An interface defining the input to the ChatGooglePaLM class.
  */
 export interface GooglePaLMChatInput extends BaseChatModelParams {
@@ -28,8 +30,15 @@ export interface GooglePaLMChatInput extends BaseChatModelParams {
    * Model Name to use
    *
    * Note: The format must follow the pattern - `models/{model}`
+   * Alias for `model`
    */
   modelName?: string;
+  /**
+   * Model Name to use
+   *
+   * Note: The format must follow the pattern - `models/{model}`
+   */
+  model?: string;
 
   /**
    * Controls the randomness of the output.
@@ -88,6 +97,8 @@ function getMessageAuthor(message: BaseMessage) {
 }
 
 /**
+ * @deprecated - Deprecated by Google. Will be removed in 0.3.0
+ *
  * A class that wraps the Google Palm chat model.
  *
  * @example
@@ -95,7 +106,7 @@ function getMessageAuthor(message: BaseMessage) {
  * const model = new ChatGooglePaLM({
  *   apiKey: "<YOUR API KEY>",
  *   temperature: 0.7,
- *   modelName: "models/chat-bison-001",
+ *   model: "models/chat-bison-001",
  *   topK: 40,
  *   topP: 1,
  *   examples: [
@@ -133,6 +144,8 @@ export class ChatGooglePaLM
 
   modelName = "models/chat-bison-001";
 
+  model = "models/chat-bison-001";
+
   temperature?: number; // default value chosen based on model
 
   topP?: number; // default value chosen based on model
@@ -148,7 +161,8 @@ export class ChatGooglePaLM
   constructor(fields?: GooglePaLMChatInput) {
     super(fields ?? {});
 
-    this.modelName = fields?.modelName ?? this.modelName;
+    this.modelName = fields?.model ?? fields?.modelName ?? this.model;
+    this.model = this.modelName;
 
     this.temperature = fields?.temperature ?? this.temperature;
     if (this.temperature && (this.temperature < 0 || this.temperature > 1)) {
@@ -240,7 +254,7 @@ export class ChatGooglePaLM
   ): Promise<protos.google.ai.generativelanguage.v1beta2.IGenerateMessageResponse> {
     const [palmMessages] = await this.client.generateMessage({
       candidateCount: 1,
-      model: this.modelName,
+      model: this.model,
       temperature: this.temperature,
       topK: this.topK,
       topP: this.topP,

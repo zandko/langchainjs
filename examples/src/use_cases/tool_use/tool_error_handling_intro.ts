@@ -20,7 +20,7 @@ const complexTool = new DynamicStructuredTool({
 import { ChatOpenAI } from "@langchain/openai";
 
 const model = new ChatOpenAI({
-  modelName: "gpt-3.5-turbo",
+  model: "gpt-3.5-turbo",
   temperature: 0,
 });
 
@@ -36,9 +36,8 @@ const modelWithTools = model.bind({
     function: { name: "complex_tool" },
   },
 });
-
-import { JsonOutputKeyToolsParser } from "langchain/output_parsers";
 import { RunnableSequence } from "@langchain/core/runnables";
+import { JsonOutputKeyToolsParser } from "@langchain/core/output_parsers/openai_tools";
 
 const chain = RunnableSequence.from([
   modelWithTools,

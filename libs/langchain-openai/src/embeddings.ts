@@ -15,8 +15,13 @@ import { wrapOpenAIClientError } from "./utils/openai.js";
  * defines additional parameters specific to the OpenAIEmbeddings class.
  */
 export interface OpenAIEmbeddingsParams extends EmbeddingsParams {
-  /** Model name to use */
+  /**
+   * Model name to use
+   * Alias for `model`
+   */
   modelName: string;
+  /** Model name to use */
+  model: string;
 
   /**
    * The number of dimensions the resulting output embeddings should have.
@@ -64,6 +69,8 @@ export class OpenAIEmbeddings
 {
   modelName = "text-embedding-ada-002";
 
+  model = "text-embedding-ada-002";
+
   batchSize = 512;
 
   // TODO: Update to `false` on next minor release (see: https://github.com/langchain-ai/langchainjs/pull/3612)
@@ -81,6 +88,8 @@ export class OpenAIEmbeddings
 
   azureOpenAIApiKey?: string;
 
+  azureADTokenProvider?: () => Promise<string>;
+
   azureOpenAIApiInstanceName?: string;
 
   azureOpenAIApiDeploymentName?: string;
@@ -89,15 +98,21 @@ export class OpenAIEmbeddings
 
   organization?: string;
 
-  private client: OpenAIClient;
+  protected client: OpenAIClient;
 
-  private clientConfig: ClientOptions;
+  protected clientConfig: ClientOptions;
 
   constructor(
     fields?: Partial<OpenAIEmbeddingsParams> &
       Partial<AzureOpenAIInput> & {
         verbose?: boolean;
+        /**
+         * The OpenAI API key to use.
+         * Alias for `apiKey`.
+         */
         openAIApiKey?: string;
+        /** The OpenAI API key to use. */
+        apiKey?: string;
         configuration?: ClientOptions;
       },
     configuration?: ClientOptions & LegacyOpenAIInput
@@ -107,14 +122,20 @@ export class OpenAIEmbeddings
     super(fieldsWithDefaults);
 
     let apiKey =
+      fieldsWithDefaults?.apiKey ??
       fieldsWithDefaults?.openAIApiKey ??
       getEnvironmentVariable("OPENAI_API_KEY");
 
     const azureApiKey =
       fieldsWithDefaults?.azureOpenAIApiKey ??
       getEnvironmentVariable("AZURE_OPENAI_API_KEY");
-    if (!azureApiKey && !apiKey) {
-      throw new Error("OpenAI or Azure OpenAI API key not found");
+
+    this.azureADTokenProvider = fields?.azureADTokenProvider ?? undefined;
+
+    if (!azureApiKey && !apiKey && !this.azureADTokenProvider) {
+      throw new Error(
+        "OpenAI or Azure OpenAI API key or Token Provider not found"
+      );
     }
 
     const azureApiInstanceName =
@@ -139,7 +160,9 @@ export class OpenAIEmbeddings
       fieldsWithDefaults?.configuration?.organization ??
       getEnvironmentVariable("OPENAI_ORGANIZATION");
 
-    this.modelName = fieldsWithDefaults?.modelName ?? this.modelName;
+    this.modelName =
+      fieldsWithDefaults?.model ?? fieldsWithDefaults?.modelName ?? this.model;
+    this.model = this.modelName;
     this.batchSize =
       fieldsWithDefaults?.batchSize ?? (azureApiKey ? 1 : this.batchSize);
     this.stripNewLines =
@@ -152,7 +175,7 @@ export class OpenAIEmbeddings
     this.azureOpenAIApiInstanceName = azureApiInstanceName;
     this.azureOpenAIApiDeploymentName = azureApiDeploymentName;
 
-    if (this.azureOpenAIApiKey) {
+    if (this.azureOpenAIApiKey || this.azureADTokenProvider) {
       if (!this.azureOpenAIApiInstanceName && !this.azureOpenAIBasePath) {
         throw new Error("Azure OpenAI API instance name not found");
       }
@@ -192,7 +215,7 @@ export class OpenAIEmbeddings
 
     const batchRequests = batches.map((batch) => {
       const params: OpenAIClient.EmbeddingCreateParams = {
-        model: this.modelName,
+        model: this.model,
         input: batch,
       };
       if (this.dimensions) {
@@ -221,7 +244,7 @@ export class OpenAIEmbeddings
    */
   async embedQuery(text: string): Promise<number[]> {
     const params: OpenAIClient.EmbeddingCreateParams = {
-      model: this.modelName,
+      model: this.model,
       input: this.stripNewLines ? text.replace(/\n/g, " ") : text,
     };
     if (this.dimensions) {
@@ -238,7 +261,7 @@ export class OpenAIEmbeddings
    * @param request Request to send to the OpenAI API.
    * @returns Promise that resolves to the response from the API.
    */
-  private async embeddingWithRetry(
+  protected async embeddingWithRetry(
     request: OpenAIClient.EmbeddingCreateParams
   ) {
     if (!this.client) {

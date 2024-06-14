@@ -1,6 +1,6 @@
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { MemoryVectorStore } from "langchain/vectorstores/memory";
-import { TokenTextSplitter } from "langchain/text_splitter";
+import { TokenTextSplitter } from "@langchain/textsplitters";
 import { SearchApiLoader } from "langchain/document_loaders/web/searchapi";
 import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { createStuffDocumentsChain } from "langchain/chains/combine_documents";
@@ -8,7 +8,7 @@ import { createRetrievalChain } from "langchain/chains/retrieval";
 
 // Initialize the necessary components
 const llm = new ChatOpenAI({
-  modelName: "gpt-3.5-turbo-1106",
+  model: "gpt-3.5-turbo-1106",
 });
 const embeddings = new OpenAIEmbeddings();
 const apiKey = "Your SearchApi API key";

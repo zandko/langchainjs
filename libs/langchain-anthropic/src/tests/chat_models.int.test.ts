@@ -1,7 +1,7 @@
 /* eslint-disable no-process-env */
 
 import { expect, test } from "@jest/globals";
-import { HumanMessage } from "@langchain/core/messages";
+import { AIMessageChunk, HumanMessage } from "@langchain/core/messages";
 import { ChatPromptValue } from "@langchain/core/prompt_values";
 import {
   PromptTemplate,
@@ -13,7 +13,7 @@ import {
 import { CallbackManager } from "@langchain/core/callbacks/manager";
 import { ChatAnthropic } from "../chat_models.js";
 
-test.skip("Test ChatAnthropic", async () => {
+test("Test ChatAnthropic", async () => {
   const chat = new ChatAnthropic({
     modelName: "claude-3-sonnet-20240229",
     maxRetries: 0,
@@ -21,6 +21,7 @@ test.skip("Test ChatAnthropic", async () => {
   const message = new HumanMessage("Hello!");
   const res = await chat.invoke([message]);
   console.log({ res });
+  expect(res.response_metadata.usage).toBeDefined();
 });
 
 test("Test ChatAnthropic Generate", async () => {
@@ -285,7 +286,7 @@ test("Test ChatAnthropic headers passed through", async () => {
   const chat = new ChatAnthropic({
     modelName: "claude-3-sonnet-20240229",
     maxRetries: 0,
-    anthropicApiKey: "NOT_REAL",
+    apiKey: "NOT_REAL",
     clientOptions: {
       defaultHeaders: {
         "X-Api-Key": process.env.ANTHROPIC_API_KEY,
@@ -316,4 +317,31 @@ test("Test ChatAnthropic multimodal", async () => {
     }),
   ]);
   console.log(res);
+});
+
+test("Stream tokens", async () => {
+  const model = new ChatAnthropic({
+    model: "claude-3-haiku-20240307",
+    temperature: 0,
+  });
+  let res: AIMessageChunk | null = null;
+  for await (const chunk of await model.stream(
+    "Why is the sky blue? Be concise."
+  )) {
+    if (!res) {
+      res = chunk;
+    } else {
+      res = res.concat(chunk);
+    }
+  }
+  console.log(res);
+  expect(res?.usage_metadata).toBeDefined();
+  if (!res?.usage_metadata) {
+    return;
+  }
+  expect(res.usage_metadata.input_tokens).toBe(34);
+  expect(res.usage_metadata.output_tokens).toBeGreaterThan(10);
+  expect(res.usage_metadata.total_tokens).toBe(
+    res.usage_metadata.input_tokens + res.usage_metadata.output_tokens
+  );
 });

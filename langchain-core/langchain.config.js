@@ -10,7 +10,7 @@ function abs(relativePath) {
 }
 
 export const config = {
-  internals: [/node\:/, /js-tiktoken/],
+  internals: [/node\:/, /js-tiktoken/, /langsmith/],
   entrypoints: {
     agents: "agents",
     caches: "caches",
@@ -19,8 +19,10 @@ export const config = {
     "callbacks/promises": "callbacks/promises",
     chat_history: "chat_history",
     documents: "documents/index",
+    "document_loaders/base": "document_loaders/base",
     embeddings: "embeddings",
     example_selectors: "example_selectors/index",
+    indexing: "indexing/index",
     "language_models/base": "language_models/base",
     "language_models/chat_models": "language_models/chat_models",
     "language_models/llms": "language_models/llms",
@@ -28,6 +30,7 @@ export const config = {
     "load/serializable": "load/serializable",
     memory: "memory",
     messages: "messages/index",
+    "messages/tool": "messages/tool",
     output_parsers: "output_parsers/index",
     "output_parsers/openai_tools": "output_parsers/openai_tools/index",
     "output_parsers/openai_functions": "output_parsers/openai_functions/index",
@@ -40,6 +43,7 @@ export const config = {
     "retrievers/document_compressors": "retrievers/document_compressors/base",
     singletons: "singletons/index",
     stores: "stores",
+    "structured_query": "structured_query/index",
     tools: "tools",
     "tracers/base": "tracers/base",
     "tracers/console": "tracers/console",

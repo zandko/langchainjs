@@ -18,6 +18,10 @@ import IntegrationInstallTooltip from "@mdx_components/integration_install_toolt
 npm install @langchain/openai
 ```
 
+import UnifiedModelParamsTooltip from "@mdx_components/unified_model_params_tooltip.mdx";
+
+<UnifiedModelParamsTooltip></UnifiedModelParamsTooltip>
+
 <CodeBlock language="typescript">{OpenAI}</CodeBlock>
 
 If you're part of an organization, you can set `process.env.OPENAI_ORGANIZATION` with your OpenAI organization id, or pass it in as `organization` when
@@ -66,7 +70,7 @@ import WSAZodExample from "@examples/models/chat/integration_openai_wsa_zod.ts";
 
 <CodeBlock language="typescript">{WSAZodExample}</CodeBlock>
 
-Additionally, you can pass in a JSON schema directly:
+Additionally, you can pass in an OpenAI function definition or JSON schema directly:
 
 :::info
 If using `jsonMode` as the `method` you must include context in your prompt about the structured output you want. This _must_ include the keyword: `JSON`.
@@ -121,3 +125,29 @@ You can also use the callbacks system:
 ### With `.generate()`
 
 <CodeBlock language="typescript">{OpenAIGenerationInfo}</CodeBlock>
+
+### Streaming tokens
+
+OpenAI supports streaming token counts via an opt-in call option. This can be set by passing `{ stream_options: { include_usage: true } }`.
+Setting this call option will cause the model to return an additional chunk at the end of the stream, containing the token usage.
+
+import OpenAIStreamTokens from "@examples/models/chat/integration_openai_stream_tokens.ts";
+
+<CodeBlock language="typescript">{OpenAIStreamTokens}</CodeBlock>
+
+:::tip
+See the LangSmith trace [here](https://smith.langchain.com/public/66bf7377-cc69-4676-91b6-25929a05e8b7/r)
+:::
+
+### Disabling parallel tool calls
+
+If you have multiple tools bound to the model, but you'd only like for a single tool to be called at a time, you can pass the `parallel_tool_calls` call option to enable/disable this behavior.
+By default, `parallel_tool_calls` is set to `true`.
+
+import OpenAIParallelToolCallsTokens from "@examples/models/chat/integration_openai_parallel_tool_calls.ts";
+
+<CodeBlock language="typescript">{OpenAIParallelToolCallsTokens}</CodeBlock>
+
+:::tip
+See the LangSmith trace for the first invocation [here](https://smith.langchain.com/public/68f2ff13-6331-47d8-a8c0-d1745788e84e/r) and the second invocation [here](https://smith.langchain.com/public/6c2fff29-9470-486a-8715-805fda631024/r)
+:::

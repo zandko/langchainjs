@@ -4,6 +4,8 @@ import { Embeddings, EmbeddingsParams } from "@langchain/core/embeddings";
 import { getEnvironmentVariable } from "@langchain/core/utils/env";
 
 /**
+ * @deprecated - Deprecated by Google. Will be removed in 0.3.0
+ *
  * Interface that extends EmbeddingsParams and defines additional
  * parameters specific to the GooglePaLMEmbeddings class.
  */
@@ -11,9 +13,17 @@ export interface GooglePaLMEmbeddingsParams extends EmbeddingsParams {
   /**
    * Model Name to use
    *
+   * Alias for `model`
+   *
    * Note: The format must follow the pattern - `models/{model}`
    */
   modelName?: string;
+  /**
+   * Model Name to use
+   *
+   * Note: The format must follow the pattern - `models/{model}`
+   */
+  model?: string;
   /**
    * Google Palm API key to use
    */
@@ -21,6 +31,8 @@ export interface GooglePaLMEmbeddingsParams extends EmbeddingsParams {
 }
 
 /**
+ * @deprecated - Deprecated by Google. Will be removed in 0.3.0
+ *
  * Class that extends the Embeddings class and provides methods for
  * generating embeddings using the Google Palm API.
  *
@@ -28,7 +40,7 @@ export interface GooglePaLMEmbeddingsParams extends EmbeddingsParams {
  * ```typescript
  * const model = new GooglePaLMEmbeddings({
  *   apiKey: "<YOUR API KEY>",
- *   modelName: "models/embedding-gecko-001",
+ *   model: "models/embedding-gecko-001",
  * });
  *
  * // Embed a single query
@@ -50,12 +62,15 @@ export class GooglePaLMEmbeddings
 
   modelName = "models/embedding-gecko-001";
 
+  model = "models/embedding-gecko-001";
+
   private client: TextServiceClient;
 
   constructor(fields?: GooglePaLMEmbeddingsParams) {
     super(fields ?? {});
 
-    this.modelName = fields?.modelName ?? this.modelName;
+    this.modelName = fields?.model ?? fields?.modelName ?? this.model;
+    this.model = this.modelName;
 
     this.apiKey =
       fields?.apiKey ?? getEnvironmentVariable("GOOGLE_PALM_API_KEY");
@@ -74,7 +89,7 @@ export class GooglePaLMEmbeddings
     // replace newlines, which can negatively affect performance.
     const cleanedText = text.replace(/\n/g, " ");
     const res = await this.client.embedText({
-      model: this.modelName,
+      model: this.model,
       text: cleanedText,
     });
     return res[0].embedding?.value ?? [];

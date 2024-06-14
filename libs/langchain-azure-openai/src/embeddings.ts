@@ -15,11 +15,14 @@ import { chunkArray } from "@langchain/core/utils/chunk_array";
 import { AzureOpenAIInput, AzureOpenAIEmbeddingsParams } from "./types.js";
 import { USER_AGENT_PREFIX } from "./constants.js";
 
+/** @deprecated Import from "@langchain/openai" instead. */
 export class AzureOpenAIEmbeddings
   extends Embeddings
   implements AzureOpenAIEmbeddingsParams, AzureOpenAIInput
 {
   modelName = "text-embedding-ada-002";
+
+  model = "text-embedding-ada-002";
 
   batchSize = 512;
 
@@ -30,6 +33,8 @@ export class AzureOpenAIEmbeddings
   user?: string;
 
   azureOpenAIApiKey?: string;
+
+  apiKey?: string;
 
   azureOpenAIEndpoint?: string;
 
@@ -57,25 +62,28 @@ export class AzureOpenAIEmbeddings
       fields?.azureOpenAIEndpoint ??
       getEnvironmentVariable("AZURE_OPENAI_API_ENDPOINT");
 
-    this.azureOpenAIApiKey =
-      fields?.azureOpenAIApiKey ??
+    const openAiApiKey =
+      fields?.apiKey ??
       fields?.openAIApiKey ??
-      (getEnvironmentVariable("AZURE_OPENAI_API_KEY") ||
-        getEnvironmentVariable("OPENAI_API_KEY"));
+      getEnvironmentVariable("OPENAI_API_KEY");
+
+    this.azureOpenAIApiKey =
+      fields?.apiKey ??
+      fields?.azureOpenAIApiKey ??
+      getEnvironmentVariable("AZURE_OPENAI_API_KEY") ??
+      openAiApiKey;
+    this.apiKey = this.azureOpenAIApiKey;
 
     const azureCredential =
       fields?.credentials ??
-      (fields?.azureOpenAIApiKey ||
-      getEnvironmentVariable("AZURE_OPENAI_API_KEY")
-        ? new AzureKeyCredential(this.azureOpenAIApiKey ?? "")
-        : new OpenAIKeyCredential(this.azureOpenAIApiKey ?? ""));
+      (this.apiKey === openAiApiKey
+        ? new OpenAIKeyCredential(this.apiKey ?? "")
+        : new AzureKeyCredential(this.apiKey ?? ""));
 
-    const isOpenAIApiKey =
-      fields?.azureOpenAIApiKey ||
-      // eslint-disable-next-line no-instanceof/no-instanceof
-      azureCredential instanceof OpenAIKeyCredential;
+    // eslint-disable-next-line no-instanceof/no-instanceof
+    const isOpenAIApiKey = azureCredential instanceof OpenAIKeyCredential;
 
-    if (!this.azureOpenAIApiKey && !fields?.credentials) {
+    if (!this.apiKey && !fields?.credentials) {
       throw new Error("Azure OpenAI API key not found");
     }
 
@@ -87,11 +95,12 @@ export class AzureOpenAIEmbeddings
       throw new Error("Azure OpenAI Deployment name not found");
     }
 
-    this.modelName = fieldsWithDefaults?.modelName ?? this.modelName;
+    this.modelName =
+      fieldsWithDefaults?.model ?? fieldsWithDefaults?.modelName ?? this.model;
+    this.model = this.modelName;
 
     this.batchSize =
-      fieldsWithDefaults?.batchSize ??
-      (this.azureOpenAIApiKey ? 1 : this.batchSize);
+      fieldsWithDefaults?.batchSize ?? (this.apiKey ? 1 : this.batchSize);
 
     this.stripNewLines =
       fieldsWithDefaults?.stripNewLines ?? this.stripNewLines;
@@ -129,30 +138,30 @@ export class AzureOpenAIEmbeddings
 
     const batchRequests = batches.map((batch) => this.getEmbeddings(batch));
     const embeddings = await Promise.all(batchRequests);
-
-    return embeddings;
+    return embeddings.flat();
   }
 
   async embedQuery(document: string): Promise<number[]> {
     const input = [
       this.stripNewLines ? document.replace(/\n/g, " ") : document,
     ];
-    return this.getEmbeddings(input);
+    const embeddings = await this.getEmbeddings(input);
+    return embeddings.flat();
   }
 
-  private async getEmbeddings(input: string[]) {
-    const deploymentName = this.azureOpenAIApiDeploymentName || this.modelName;
+  private async getEmbeddings(input: string[]): Promise<number[][]> {
+    const deploymentName = this.azureOpenAIApiDeploymentName || this.model;
 
     const res = await this.caller.call(() =>
       this.client.getEmbeddings(deploymentName, input, {
         user: this.user,
-        model: this.modelName,
+        model: this.model,
         requestOptions: {
           timeout: this.timeout,
         },
       })
     );
 
-    return res.data[0].embedding;
+    return res.data.map((data) => data.embedding);
   }
 }

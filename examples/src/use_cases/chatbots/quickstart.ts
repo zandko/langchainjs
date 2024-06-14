@@ -5,7 +5,7 @@
 import { ChatOpenAI } from "@langchain/openai";
 
 const chat = new ChatOpenAI({
-  modelName: "gpt-3.5-turbo-1106",
+  model: "gpt-3.5-turbo-1106",
   temperature: 0.2,
 });
 
@@ -54,7 +54,7 @@ await chain.invoke({
   ],
 });
 
-import { ChatMessageHistory } from "langchain/stores/message/in_memory";
+import { ChatMessageHistory } from "@langchain/community/stores/message/in_memory";
 
 const demoEphemeralChatMessageHistory = new ChatMessageHistory();
 
@@ -94,7 +94,7 @@ const loader = new CheerioWebBaseLoader(
 
 const rawDocs = await loader.load();
 
-import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
+import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
 const textSplitter = new RecursiveCharacterTextSplitter({
   chunkSize: 500,

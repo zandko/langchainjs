@@ -5,7 +5,7 @@ import {
 } from "@langchain/community/vectorstores/couchbase";
 import { Cluster } from "couchbase";
 import { TextLoader } from "langchain/document_loaders/fs/text";
-import { CharacterTextSplitter } from "langchain/text_splitter";
+import { CharacterTextSplitter } from "@langchain/textsplitters";
 
 const connectionString =
   process.env.COUCHBASE_DB_CONN_STR ?? "couchbase://localhost";
@@ -29,7 +29,7 @@ const couchbaseClient = await Cluster.connect(connectionString, {
 
 // Open AI API Key is required to use OpenAIEmbeddings, some other embeddings may also be used
 const embeddings = new OpenAIEmbeddings({
-  openAIApiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
 const couchbaseConfig: CouchbaseVectorStoreArgs = {

@@ -25,9 +25,19 @@ import {
   type BasePromptTemplateInput,
   type TypedPromptInputValues,
 } from "./base.js";
-import { PromptTemplate, type ParamsFromFString } from "./prompt.js";
+import {
+  PromptTemplate,
+  type ParamsFromFString,
+  PromptTemplateInput,
+  ExtractedFStringParams,
+} from "./prompt.js";
 import { ImagePromptTemplate } from "./image.js";
-import { parseFString } from "./template.js";
+import {
+  ParsedTemplateNode,
+  TemplateFormat,
+  parseFString,
+  parseMustache,
+} from "./template.js";
 
 /**
  * Abstract class that serves as a base for creating message prompt
@@ -329,8 +339,17 @@ export class ChatMessagePromptTemplate<
     return new ChatMessage(await this.prompt.format(values), this.role);
   }
 
-  static fromTemplate(template: string, role: string) {
-    return new this(PromptTemplate.fromTemplate(template), role);
+  static fromTemplate(
+    template: string,
+    role: string,
+    options?: { templateFormat?: TemplateFormat }
+  ) {
+    return new this(
+      PromptTemplate.fromTemplate(template, {
+        templateFormat: options?.templateFormat,
+      }),
+      role
+    );
   }
 }
 
@@ -351,6 +370,12 @@ type MessageClass =
 
 type ChatMessageClass = typeof ChatMessage;
 
+interface _StringImageMessagePromptTemplateOptions<
+  Format extends TemplateFormat = TemplateFormat
+> extends Record<string, unknown> {
+  templateFormat?: Format;
+}
+
 class _StringImageMessagePromptTemplate<
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   RunInput extends InputValues = any,
@@ -362,7 +387,7 @@ class _StringImageMessagePromptTemplate<
 
   inputVariables: Array<Extract<keyof RunInput, string>> = [];
 
-  additionalOptions: Record<string, unknown> = {};
+  additionalOptions: _StringImageMessagePromptTemplateOptions = {};
 
   prompt:
     | BaseStringPromptTemplate<
@@ -399,7 +424,7 @@ class _StringImageMessagePromptTemplate<
     /** @TODO When we come up with a better way to type prompt templates, fix this */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     fields: any,
-    additionalOptions?: Record<string, unknown>
+    additionalOptions?: _StringImageMessagePromptTemplateOptions
   ) {
     if (!("prompt" in fields)) {
       // eslint-disable-next-line no-param-reassign
@@ -456,10 +481,10 @@ class _StringImageMessagePromptTemplate<
 
   static fromTemplate(
     template: string | Array<string | _TextTemplateParam | _ImageTemplateParam>,
-    additionalOptions?: Record<string, unknown>
+    additionalOptions?: _StringImageMessagePromptTemplateOptions
   ) {
     if (typeof template === "string") {
-      return new this(PromptTemplate.fromTemplate(template));
+      return new this(PromptTemplate.fromTemplate(template, additionalOptions));
     }
     const prompt: Array<
       PromptTemplate<InputValues> | ImagePromptTemplate<InputValues>
@@ -475,13 +500,19 @@ class _StringImageMessagePromptTemplate<
         } else if (typeof item.text === "string") {
           text = item.text ?? "";
         }
-        prompt.push(PromptTemplate.fromTemplate(text));
+        prompt.push(PromptTemplate.fromTemplate(text, additionalOptions));
       } else if (typeof item === "object" && "image_url" in item) {
         let imgTemplate = item.image_url ?? "";
         let imgTemplateObject: ImagePromptTemplate<InputValues>;
         let inputVariables: string[] = [];
         if (typeof imgTemplate === "string") {
-          const parsedTemplate = parseFString(imgTemplate);
+          let parsedTemplate: ParsedTemplateNode[];
+          if (additionalOptions?.templateFormat === "mustache") {
+            parsedTemplate = parseMustache(imgTemplate);
+          } else {
+            parsedTemplate = parseFString(imgTemplate);
+          }
+
           const variables = parsedTemplate.flatMap((item) =>
             item.type === "variable" ? [item.name] : []
           );
@@ -504,7 +535,13 @@ class _StringImageMessagePromptTemplate<
           });
         } else if (typeof imgTemplate === "object") {
           if ("url" in imgTemplate) {
-            const parsedTemplate = parseFString(imgTemplate.url);
+            let parsedTemplate: ParsedTemplateNode[];
+            if (additionalOptions?.templateFormat === "mustache") {
+              parsedTemplate = parseMustache(imgTemplate.url);
+            } else {
+              parsedTemplate = parseFString(imgTemplate.url);
+            }
+
             inputVariables = parsedTemplate.flatMap((item) =>
               item.type === "variable" ? [item.name] : []
             );
@@ -662,6 +699,12 @@ export interface ChatPromptTemplateInput<
    * @defaultValue `true`
    */
   validateTemplate?: boolean;
+
+  /**
+   * The formatting method to use on the prompt.
+   * @default "f-string"
+   */
+  templateFormat?: TemplateFormat;
 }
 
 export type BaseMessagePromptTemplateLike =
@@ -677,8 +720,19 @@ function _isBaseMessagePromptTemplate(
   );
 }
 
-function _coerceMessagePromptTemplateLike(
-  messagePromptTemplateLike: BaseMessagePromptTemplateLike
+function _coerceMessagePromptTemplateLike<
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  RunInput extends InputValues = any,
+  Extra extends Omit<
+    ChatPromptTemplateInput<RunInput>,
+    "inputVariables" | "promptMessages" | "partialVariables"
+  > = Omit<
+    ChatPromptTemplateInput<RunInput>,
+    "inputVariables" | "promptMessages" | "partialVariables"
+  >
+>(
+  messagePromptTemplateLike: BaseMessagePromptTemplateLike,
+  extra?: Extra
 ): BaseMessagePromptTemplate | BaseMessage {
   if (
     _isBaseMessagePromptTemplate(messagePromptTemplateLike) ||
@@ -704,16 +758,42 @@ function _coerceMessagePromptTemplateLike(
     return new MessagesPlaceholder({ variableName, optional: true });
   }
   const message = coerceMessageLikeToMessage(messagePromptTemplateLike);
+  let templateData:
+    | string
+    | (
+        | string
+        | _TextTemplateParam
+        | _ImageTemplateParam
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        | Record<string, any>
+      )[];
+
+  if (typeof message.content === "string") {
+    templateData = message.content;
+  } else {
+    // Assuming message.content is an array of complex objects, transform it.
+    templateData = message.content.map((item) => {
+      if ("text" in item) {
+        return { text: item.text };
+      } else if ("image_url" in item) {
+        return { image_url: item.image_url };
+      } else {
+        return item;
+      }
+    });
+  }
+
   if (message._getType() === "human") {
-    return HumanMessagePromptTemplate.fromTemplate(message.content);
+    return HumanMessagePromptTemplate.fromTemplate(templateData, extra);
   } else if (message._getType() === "ai") {
-    return AIMessagePromptTemplate.fromTemplate(message.content);
+    return AIMessagePromptTemplate.fromTemplate(templateData, extra);
   } else if (message._getType() === "system") {
-    return SystemMessagePromptTemplate.fromTemplate(message.content);
+    return SystemMessagePromptTemplate.fromTemplate(templateData, extra);
   } else if (ChatMessage.isInstance(message)) {
     return ChatMessagePromptTemplate.fromTemplate(
       message.content as string,
-      message.role
+      message.role,
+      extra
     );
   } else {
     throw new Error(
@@ -768,8 +848,17 @@ export class ChatPromptTemplate<
 
   validateTemplate = true;
 
+  templateFormat: TemplateFormat = "f-string";
+
   constructor(input: ChatPromptTemplateInput<RunInput, PartialVariableName>) {
     super(input);
+    // If input is mustache and validateTemplate is not defined, set it to false
+    if (
+      input.templateFormat === "mustache" &&
+      input.validateTemplate === undefined
+    ) {
+      this.validateTemplate = false;
+    }
     Object.assign(this, input);
 
     if (this.validateTemplate) {
@@ -841,7 +930,12 @@ export class ChatPromptTemplate<
           imageUrl = item.image_url.url;
         }
 
-        const promptTemplatePlaceholder = PromptTemplate.fromTemplate(imageUrl);
+        const promptTemplatePlaceholder = PromptTemplate.fromTemplate(
+          imageUrl,
+          {
+            templateFormat: this.templateFormat,
+          }
+        );
         const formattedUrl = await promptTemplatePlaceholder.format(
           inputValues
         );
@@ -927,8 +1021,50 @@ export class ChatPromptTemplate<
     // eslint-disable-next-line @typescript-eslint/ban-types
     RunInput extends InputValues = Symbol,
     T extends string = string
-  >(template: T) {
-    const prompt = PromptTemplate.fromTemplate(template);
+  >(
+    template: T,
+    options?: Omit<
+      PromptTemplateInput<RunInput, string, "f-string">,
+      "template" | "inputVariables"
+    >
+  ): ChatPromptTemplate<ExtractedFStringParams<T, RunInput>>;
+
+  static fromTemplate<
+    // eslint-disable-next-line @typescript-eslint/ban-types
+    RunInput extends InputValues = Symbol,
+    T extends string = string
+  >(
+    template: T,
+    options?: Omit<
+      PromptTemplateInput<RunInput, string>,
+      "template" | "inputVariables"
+    >
+  ): ChatPromptTemplate<ExtractedFStringParams<T, RunInput>>;
+
+  static fromTemplate<
+    // eslint-disable-next-line @typescript-eslint/ban-types
+    RunInput extends InputValues = Symbol,
+    T extends string = string
+  >(
+    template: T,
+    options?: Omit<
+      PromptTemplateInput<RunInput, string, "mustache">,
+      "template" | "inputVariables"
+    >
+  ): ChatPromptTemplate<InputValues>;
+
+  static fromTemplate<
+    // eslint-disable-next-line @typescript-eslint/ban-types
+    RunInput extends InputValues = Symbol,
+    T extends string = string
+  >(
+    template: T,
+    options?: Omit<
+      PromptTemplateInput<RunInput, string, TemplateFormat>,
+      "template" | "inputVariables"
+    >
+  ): ChatPromptTemplate<ExtractedFStringParams<T, RunInput> | InputValues> {
+    const prompt = PromptTemplate.fromTemplate(template, options);
     const humanTemplate = new HumanMessagePromptTemplate({ prompt });
     return this.fromMessages<
       // eslint-disable-next-line @typescript-eslint/ban-types
@@ -962,7 +1098,15 @@ export class ChatPromptTemplate<
           // eslint-disable-next-line no-instanceof/no-instanceof
           promptMessage instanceof ChatPromptTemplate
             ? promptMessage.promptMessages
-            : [_coerceMessagePromptTemplateLike(promptMessage)]
+            : [
+                _coerceMessagePromptTemplateLike<
+                  RunInput,
+                  Omit<
+                    Extra,
+                    "inputVariables" | "promptMessages" | "partialVariables"
+                  >
+                >(promptMessage, extra),
+              ]
         ),
       []
     );
@@ -990,6 +1134,7 @@ export class ChatPromptTemplate<
       inputVariables: [...inputVariables] as Extract<keyof RunInput, string>[],
       promptMessages: flattenedMessages,
       partialVariables: flattenedPartialVariables,
+      templateFormat: extra?.templateFormat,
     });
   }
 

@@ -3,6 +3,11 @@
 
 import { z } from "zod";
 import { DynamicStructuredTool } from "@langchain/core/tools";
+import { RunnableSequence } from "@langchain/core/runnables";
+import {
+  JsonOutputToolsParser,
+  JsonOutputKeyToolsParser,
+} from "@langchain/core/output_parsers/openai_tools";
 
 const multiplyTool = new DynamicStructuredTool({
   name: "multiply",
@@ -21,7 +26,7 @@ console.log(await multiplyTool.invoke({ firstInt: 4, secondInt: 5 }));
 import { ChatOpenAI } from "@langchain/openai";
 
 const model = new ChatOpenAI({
-  modelName: "gpt-3.5-turbo-1106",
+  model: "gpt-3.5-turbo-1106",
 });
 
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling";
@@ -38,12 +43,6 @@ const modelWithTools = model.bind({
     function: { name: "multiply" },
   },
 });
-
-import {
-  JsonOutputToolsParser,
-  JsonOutputKeyToolsParser,
-} from "langchain/output_parsers";
-
 const chain = modelWithTools.pipe(new JsonOutputToolsParser());
 
 console.log(await chain.invoke("What's 4 times 23?"));
@@ -53,8 +52,6 @@ const chain2 = modelWithTools.pipe(
 );
 
 console.log(await chain2.invoke("What's 4 times 23?"));
-
-import { RunnableSequence } from "@langchain/core/runnables";
 
 const chain3 = RunnableSequence.from([
   modelWithTools,

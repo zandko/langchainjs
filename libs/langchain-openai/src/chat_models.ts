@@ -12,6 +12,8 @@ import {
   SystemMessageChunk,
   ToolMessage,
   ToolMessageChunk,
+  OpenAIToolCall,
+  isAIMessage,
 } from "@langchain/core/messages";
 import {
   type ChatGeneration,
@@ -22,6 +24,7 @@ import { type StructuredToolInterface } from "@langchain/core/tools";
 import { getEnvironmentVariable } from "@langchain/core/utils/env";
 import {
   BaseChatModel,
+  LangSmithParams,
   type BaseChatModelParams,
 } from "@langchain/core/language_models/chat_models";
 import type {
@@ -44,7 +47,12 @@ import {
   StructuredOutputParser,
   type BaseLLMOutputParser,
 } from "@langchain/core/output_parsers";
-import { JsonOutputKeyToolsParser } from "@langchain/core/output_parsers/openai_tools";
+import {
+  JsonOutputKeyToolsParser,
+  convertLangChainToolCallToOpenAI,
+  makeInvalidToolCall,
+  parseToolCall,
+} from "@langchain/core/output_parsers/openai_tools";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type {
   AzureOpenAIInput,
@@ -120,12 +128,31 @@ export function messageToOpenAIRole(message: BaseMessage): OpenAIRoleEnum {
 function openAIResponseToChatMessage(
   message: OpenAIClient.Chat.Completions.ChatCompletionMessage
 ): BaseMessage {
+  const rawToolCalls: OpenAIToolCall[] | undefined = message.tool_calls as
+    | OpenAIToolCall[]
+    | undefined;
   switch (message.role) {
-    case "assistant":
-      return new AIMessage(message.content || "", {
-        function_call: message.function_call,
-        tool_calls: message.tool_calls,
+    case "assistant": {
+      const toolCalls = [];
+      const invalidToolCalls = [];
+      for (const rawToolCall of rawToolCalls ?? []) {
+        try {
+          toolCalls.push(parseToolCall(rawToolCall, { returnId: true }));
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } catch (e: any) {
+          invalidToolCalls.push(makeInvalidToolCall(rawToolCall, e.message));
+        }
+      }
+      return new AIMessage({
+        content: message.content || "",
+        tool_calls: toolCalls,
+        invalid_tool_calls: invalidToolCalls,
+        additional_kwargs: {
+          function_call: message.function_call,
+          tool_calls: rawToolCalls,
+        },
       });
+    }
     default:
       return new ChatMessage(message.content || "", message.role ?? "unknown");
   }
@@ -153,7 +180,22 @@ function _convertDeltaToMessageChunk(
   if (role === "user") {
     return new HumanMessageChunk({ content });
   } else if (role === "assistant") {
-    return new AIMessageChunk({ content, additional_kwargs });
+    const toolCallChunks = [];
+    if (Array.isArray(delta.tool_calls)) {
+      for (const rawToolCall of delta.tool_calls) {
+        toolCallChunks.push({
+          name: rawToolCall.function?.name,
+          args: rawToolCall.function?.arguments,
+          id: rawToolCall.id,
+          index: rawToolCall.index,
+        });
+      }
+    }
+    return new AIMessageChunk({
+      content,
+      tool_call_chunks: toolCallChunks,
+      additional_kwargs,
+    });
   } else if (role === "system") {
     return new SystemMessageChunk({ content });
   } else if (role === "function") {
@@ -186,12 +228,20 @@ function convertMessagesToOpenAIParams(messages: BaseMessage[]) {
     }
     if (message.additional_kwargs.function_call != null) {
       completionParam.function_call = message.additional_kwargs.function_call;
+      completionParam.content = null;
     }
-    if (message.additional_kwargs.tool_calls != null) {
-      completionParam.tool_calls = message.additional_kwargs.tool_calls;
-    }
-    if ((message as ToolMessage).tool_call_id != null) {
-      completionParam.tool_call_id = (message as ToolMessage).tool_call_id;
+    if (isAIMessage(message) && !!message.tool_calls?.length) {
+      completionParam.tool_calls = message.tool_calls.map(
+        convertLangChainToolCallToOpenAI
+      );
+      completionParam.content = null;
+    } else {
+      if (message.additional_kwargs.tool_calls != null) {
+        completionParam.tool_calls = message.additional_kwargs.tool_calls;
+      }
+      if ((message as ToolMessage).tool_call_id != null) {
+        completionParam.tool_call_id = (message as ToolMessage).tool_call_id;
+      }
     }
     return completionParam as OpenAICompletionParam;
   });
@@ -205,19 +255,34 @@ export interface ChatOpenAICallOptions
   promptIndex?: number;
   response_format?: { type: "json_object" };
   seed?: number;
+  /**
+   * Additional options to pass to streamed completions.
+   */
+  stream_options?: {
+    /**
+     * Whether or not to include token usage in the stream.
+     * If set to `true`, this will include an additional
+     * chunk at the end of the stream with the token usage.
+     */
+    include_usage: boolean;
+  };
+  /**
+   * Whether or not to restrict the ability to
+   * call multiple tools in one response.
+   */
+  parallel_tool_calls?: boolean;
 }
 
 /**
  * Wrapper around OpenAI large language models that use the Chat endpoint.
  *
- * To use you should have the `openai` package installed, with the
- * `OPENAI_API_KEY` environment variable set.
+ * To use you should have the `OPENAI_API_KEY` environment variable set.
  *
- * To use with Azure you should have the `openai` package installed, with the
+ * To use with Azure you should have the:
  * `AZURE_OPENAI_API_KEY`,
  * `AZURE_OPENAI_API_INSTANCE_NAME`,
  * `AZURE_OPENAI_API_DEPLOYMENT_NAME`
- * and `AZURE_OPENAI_API_VERSION` environment variable set.
+ * and `AZURE_OPENAI_API_VERSION` environment variables set.
  * `AZURE_OPENAI_BASE_PATH` is optional and will override `AZURE_OPENAI_API_INSTANCE_NAME` if you need to use a custom endpoint.
  *
  * @remarks
@@ -230,7 +295,7 @@ export interface ChatOpenAICallOptions
  * // Create a new instance of ChatOpenAI with specific temperature and model name settings
  * const model = new ChatOpenAI({
  *   temperature: 0.9,
- *   modelName: "ft:gpt-3.5-turbo-0613:{ORG_NAME}::{MODEL_ID}",
+ *   model: "ft:gpt-3.5-turbo-0613:{ORG_NAME}::{MODEL_ID}",
  * });
  *
  * // Invoke the model with a message and await the response
@@ -244,7 +309,7 @@ export interface ChatOpenAICallOptions
 export class ChatOpenAI<
     CallOptions extends ChatOpenAICallOptions = ChatOpenAICallOptions
   >
-  extends BaseChatModel<CallOptions>
+  extends BaseChatModel<CallOptions, AIMessageChunk>
   implements OpenAIChatInput, AzureOpenAIInput
 {
   static lc_name() {
@@ -270,6 +335,7 @@ export class ChatOpenAI<
   get lc_secrets(): { [key: string]: string } | undefined {
     return {
       openAIApiKey: "OPENAI_API_KEY",
+      apiKey: "OPENAI_API_KEY",
       azureOpenAIApiKey: "AZURE_OPENAI_API_KEY",
       organization: "OPENAI_ORGANIZATION",
     };
@@ -279,6 +345,7 @@ export class ChatOpenAI<
     return {
       modelName: "model",
       openAIApiKey: "openai_api_key",
+      apiKey: "openai_api_key",
       azureOpenAIApiVersion: "azure_openai_api_version",
       azureOpenAIApiKey: "azure_openai_api_key",
       azureOpenAIApiInstanceName: "azure_openai_api_instance_name",
@@ -300,9 +367,13 @@ export class ChatOpenAI<
 
   modelName = "gpt-3.5-turbo";
 
+  model = "gpt-3.5-turbo";
+
   modelKwargs?: OpenAIChatInput["modelKwargs"];
 
   stop?: string[];
+
+  stopSequences?: string[];
 
   user?: string;
 
@@ -318,9 +389,13 @@ export class ChatOpenAI<
 
   openAIApiKey?: string;
 
+  apiKey?: string;
+
   azureOpenAIApiVersion?: string;
 
   azureOpenAIApiKey?: string;
+
+  azureADTokenProvider?: () => Promise<string>;
 
   azureOpenAIApiInstanceName?: string;
 
@@ -330,9 +405,9 @@ export class ChatOpenAI<
 
   organization?: string;
 
-  private client: OpenAIClient;
+  protected client: OpenAIClient;
 
-  private clientConfig: ClientOptions;
+  protected clientConfig: ClientOptions;
 
   constructor(
     fields?: Partial<OpenAIChatInput> &
@@ -346,14 +421,21 @@ export class ChatOpenAI<
     super(fields ?? {});
 
     this.openAIApiKey =
-      fields?.openAIApiKey ?? getEnvironmentVariable("OPENAI_API_KEY");
+      fields?.apiKey ??
+      fields?.openAIApiKey ??
+      getEnvironmentVariable("OPENAI_API_KEY");
+    this.apiKey = this.openAIApiKey;
 
     this.azureOpenAIApiKey =
       fields?.azureOpenAIApiKey ??
       getEnvironmentVariable("AZURE_OPENAI_API_KEY");
 
-    if (!this.azureOpenAIApiKey && !this.openAIApiKey) {
-      throw new Error("OpenAI or Azure OpenAI API key not found");
+    this.azureADTokenProvider = fields?.azureADTokenProvider ?? undefined;
+
+    if (!this.azureOpenAIApiKey && !this.apiKey && !this.azureADTokenProvider) {
+      throw new Error(
+        "OpenAI or Azure OpenAI API key or Token Provider not found"
+      );
     }
 
     this.azureOpenAIApiInstanceName =
@@ -376,7 +458,8 @@ export class ChatOpenAI<
       fields?.configuration?.organization ??
       getEnvironmentVariable("OPENAI_ORGANIZATION");
 
-    this.modelName = fields?.modelName ?? this.modelName;
+    this.modelName = fields?.model ?? fields?.modelName ?? this.model;
+    this.model = this.modelName;
     this.modelKwargs = fields?.modelKwargs ?? {};
     this.timeout = fields?.timeout;
 
@@ -389,12 +472,13 @@ export class ChatOpenAI<
     this.topLogprobs = fields?.topLogprobs;
     this.n = fields?.n ?? this.n;
     this.logitBias = fields?.logitBias;
-    this.stop = fields?.stop;
+    this.stop = fields?.stopSequences ?? fields?.stop;
+    this.stopSequences = this?.stop;
     this.user = fields?.user;
 
     this.streaming = fields?.streaming ?? false;
 
-    if (this.azureOpenAIApiKey) {
+    if (this.azureOpenAIApiKey || this.azureADTokenProvider) {
       if (!this.azureOpenAIApiInstanceName && !this.azureOpenAIBasePath) {
         throw new Error("Azure OpenAI API instance name not found");
       }
@@ -404,11 +488,11 @@ export class ChatOpenAI<
       if (!this.azureOpenAIApiVersion) {
         throw new Error("Azure OpenAI API version not found");
       }
-      this.openAIApiKey = this.openAIApiKey ?? "";
+      this.apiKey = this.apiKey ?? "";
     }
 
     this.clientConfig = {
-      apiKey: this.openAIApiKey,
+      apiKey: this.apiKey,
       organization: this.organization,
       baseURL: configuration?.basePath ?? fields?.configuration?.basePath,
       dangerouslyAllowBrowser: true,
@@ -421,6 +505,28 @@ export class ChatOpenAI<
       ...configuration,
       ...fields?.configuration,
     };
+  }
+
+  getLsParams(options: this["ParsedCallOptions"]): LangSmithParams {
+    const params = this.invocationParams(options);
+    return {
+      ls_provider: "openai",
+      ls_model_name: this.model,
+      ls_model_type: "chat",
+      ls_temperature: params.temperature ?? undefined,
+      ls_max_tokens: params.max_tokens ?? undefined,
+      ls_stop: options.stop,
+    };
+  }
+
+  override bindTools(
+    tools: (Record<string, unknown> | StructuredToolInterface)[],
+    kwargs?: Partial<CallOptions>
+  ): Runnable<BaseLanguageModelInput, AIMessageChunk, CallOptions> {
+    return this.bind({
+      tools: tools.map(convertToOpenAITool),
+      ...kwargs,
+    } as Partial<CallOptions>);
   }
 
   /**
@@ -443,7 +549,7 @@ export class ChatOpenAI<
       OpenAIClient.Chat.ChatCompletionCreateParams,
       "messages"
     > = {
-      model: this.modelName,
+      model: this.model,
       temperature: this.temperature,
       top_p: this.topP,
       frequency_penalty: this.frequencyPenalty,
@@ -453,7 +559,7 @@ export class ChatOpenAI<
       top_logprobs: this.topLogprobs,
       n: this.n,
       logit_bias: this.logitBias,
-      stop: options?.stop ?? this.stop,
+      stop: options?.stop ?? this.stopSequences,
       user: this.user,
       stream: this.streaming,
       functions: options?.functions,
@@ -464,6 +570,10 @@ export class ChatOpenAI<
       tool_choice: options?.tool_choice,
       response_format: options?.response_format,
       seed: options?.seed,
+      ...(options?.stream_options !== undefined
+        ? { stream_options: options.stream_options }
+        : {}),
+      parallel_tool_calls: options?.parallel_tool_calls,
       ...this.modelKwargs,
     };
     return params;
@@ -477,7 +587,7 @@ export class ChatOpenAI<
     model_name: string;
   } & ClientOptions {
     return {
-      model_name: this.modelName,
+      model_name: this.model,
       ...this.invocationParams(),
       ...this.clientConfig,
     };
@@ -497,8 +607,12 @@ export class ChatOpenAI<
     };
     let defaultRole: OpenAIRoleEnum | undefined;
     const streamIterable = await this.completionWithRetry(params, options);
+    let usage: OpenAIClient.Completions.CompletionUsage | undefined;
     for await (const data of streamIterable) {
       const choice = data?.choices[0];
+      if (data.usage) {
+        usage = data.usage;
+      }
       if (!choice) {
         continue;
       }
@@ -542,6 +656,20 @@ export class ChatOpenAI<
         undefined,
         { chunk: generationChunk }
       );
+    }
+    if (usage) {
+      const generationChunk = new ChatGenerationChunk({
+        message: new AIMessageChunk({
+          content: "",
+          usage_metadata: {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+          },
+        }),
+        text: "",
+      });
+      yield generationChunk;
     }
     if (options.signal?.aborted) {
       throw new Error("AbortError");
@@ -649,6 +777,13 @@ export class ChatOpenAI<
           ...(part.finish_reason ? { finish_reason: part.finish_reason } : {}),
           ...(part.logprobs ? { logprobs: part.logprobs } : {}),
         };
+        if (isAIMessage(generation.message)) {
+          generation.message.usage_metadata = {
+            input_tokens: tokenUsage.promptTokens ?? 0,
+            output_tokens: tokenUsage.completionTokens ?? 0,
+            total_tokens: tokenUsage.totalTokens ?? 0,
+          };
+        }
         generations.push(generation);
       }
       return {
@@ -724,7 +859,7 @@ export class ChatOpenAI<
     let tokensPerName = 0;
 
     // From: https://github.com/openai/openai-cookbook/blob/main/examples/How_to_format_inputs_to_ChatGPT_models.ipynb
-    if (this.modelName === "gpt-3.5-turbo-0301") {
+    if (this.model === "gpt-3.5-turbo-0301") {
       tokensPerMessage = 4;
       tokensPerName = -1;
     } else {
@@ -827,7 +962,7 @@ export class ChatOpenAI<
     });
   }
 
-  private _getClientOptions(options: OpenAICoreRequestOptions | undefined) {
+  protected _getClientOptions(options: OpenAICoreRequestOptions | undefined) {
     if (!this.client) {
       const openAIEndpointConfig: OpenAIEndpointConfig = {
         azureOpenAIApiDeploymentName: this.azureOpenAIApiDeploymentName,
