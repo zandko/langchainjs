@@ -1,27 +1,24 @@
 import { test } from "@jest/globals";
 
 import { HumanMessage } from "@langchain/core/messages";
-import { ChatBaiduWenxin } from "../chat_modelsv2.js";
+import { ChatBaiduWenxin } from "../chat_models.js";
 
-test("invokedefault", async () => {
+test("invoke", async () => {
   const chat = new ChatBaiduWenxin({
-    baiduApiKey: 'YOUR_BAK',
-    baiduSecretKey: 'YOUR_BSK'
+    model: 'ERNIE-Bot-turbo'
   });
-  const message = new HumanMessage("上海天气");
+  const message = new HumanMessage("北京天气");
   const res = await chat.invoke([message]);
   console.log({ res });
   expect(res.content.length).toBeGreaterThan(10);
 });
 
-test("invoke", async () => {
+test("invokeWithStream", async () => {
   const chat = new ChatBaiduWenxin({
-    qianfanAccessKey: 'YOUR_AK',
-    qianfanSecretKey: 'YOUR_SK',
-    model: 'SQLCoder-7B',
-    qianfanSDKName: 'Completions'
+    model: 'ERNIE-Bot-turbo',
+    streaming: true,
   });
-  const message = new HumanMessage("北京天气");
+  const message = new HumanMessage("等额本金和等额本息有什么区别？");
   const res = await chat.invoke([message]);
   console.log({ res });
   expect(res.content.length).toBeGreaterThan(10);

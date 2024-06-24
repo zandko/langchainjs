@@ -203,9 +203,7 @@ export class BaiduQianfanEmbeddings
    * @returns Promise that resolves to the response from the API.
    */
   private async embeddingWithRetry(body: EmbeddingCreateParams) {
-    const embeddingData: EmbeddingResponse | EmbeddingErrorResponse = await this.embeddingIns.embedding({
-        ...body
-    }, this.modelName);
+    const embeddingData: EmbeddingResponse | EmbeddingErrorResponse = await this.embeddingIns.embedding(body, this.modelName);
 
     if ("error_code" in embeddingData && embeddingData.error_code) {
       throw new Error(
